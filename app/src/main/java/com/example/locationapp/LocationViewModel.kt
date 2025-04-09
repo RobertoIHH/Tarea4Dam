@@ -9,6 +9,7 @@ import com.example.locationapp.data.AppDatabase
 import com.example.locationapp.data.ExploredZone
 import com.example.locationapp.data.PointOfInterest
 import com.example.locationapp.data.PointOfInterestRepository
+import com.example.locationapp.maps.MapProviderManager
 import com.example.locationapp.routing.RouteGenerator
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -43,6 +44,14 @@ class LocationViewModel(application: Application) : AndroidViewModel(application
     private val _currentRoute = MutableStateFlow<RouteGenerator.Route?>(null)
     val currentRoute: StateFlow<RouteGenerator.Route?> = _currentRoute.asStateFlow()
 
+    // NUEVO: Para la URL del mapa
+    private val _urlState = MutableStateFlow("")
+    val urlState: StateFlow<String> = _urlState.asStateFlow()
+
+    // NUEVO: Para el proveedor del mapa
+    private val _mapProviderKey = MutableStateFlow("openstreetmap")
+    val mapProviderKey: StateFlow<String> = _mapProviderKey.asStateFlow()
+
     init {
         val database = AppDatabase.getDatabase(application)
         val pointOfInterestDao = database.pointOfInterestDao()
@@ -66,8 +75,40 @@ class LocationViewModel(application: Application) : AndroidViewModel(application
         initializeExampleDataIfNeeded()
     }
 
+    // NUEVO: Configurar el proveedor de mapas
+    fun setMapProvider(providerKey: String) {
+        _mapProviderKey.value = providerKey
+        MapProviderManager.setProvider(providerKey)
+
+        // Si tenemos una ubicación actual, actualizar la URL del mapa
+        _currentLocation.value?.let { (latitude, longitude) ->
+            showLocation(latitude, longitude)
+        }
+    }
+
+    // NUEVO: Buscar ubicación usando el proveedor actual
+    fun searchLocation(query: String) {
+        val provider = MapProviderManager.getCurrentProvider()
+        viewModelScope.launch {
+            if (query.isNotEmpty()) {
+                _urlState.value = provider.getSearchUrl(query)
+            }
+        }
+    }
+
+    // NUEVO: Mostrar ubicación en el mapa usando el proveedor actual
+    fun showLocation(latitude: Double, longitude: Double, zoom: Int = 15) {
+        val provider = MapProviderManager.getCurrentProvider()
+        viewModelScope.launch {
+            _urlState.value = provider.getMapUrl(latitude, longitude, zoom)
+        }
+    }
+
     fun setCurrentLocation(latitude: Double, longitude: Double) {
         _currentLocation.value = Pair(latitude, longitude)
+
+        // NUEVO: Actualizar la URL del mapa con la nueva ubicación
+        showLocation(latitude, longitude)
 
         // Verificar si el usuario ha entrado en alguna zona nueva
         viewModelScope.launch {

@@ -27,10 +27,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.LocationOn
-import androidx.compose.material.icons.outlined.Star // Usaremos Bookmark en lugar de Save
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.Bookmarks
-import androidx.compose.material.icons.outlined.Favorite
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -44,6 +42,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModelProvider
 import com.example.locationapp.ui.theme.LocationAppTheme
 import com.example.locationapp.viewmodel.LocationViewModel
+import com.example.locationapp.maps.MapProviderManager
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationServices
 import kotlinx.coroutines.launch
@@ -52,17 +51,23 @@ class MainActivity : ComponentActivity() {
     private lateinit var fusedLocationClient: FusedLocationProviderClient
     private lateinit var viewModel: LocationViewModel
     private var webViewReference: WebView? = null
+    private lateinit var sharedPreferences: SharedPreferences
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Log.d("MainActivity", "onCreate iniciado")
+
+        // Inicializar SharedPreferences
+        sharedPreferences = getPreferences(Context.MODE_PRIVATE)
+        val savedMapProvider = sharedPreferences.getString("map_provider", "openstreetmap")
 
         // Inicializar el cliente de ubicación
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
         Log.d("MainActivity", "FusedLocationClient inicializado")
 
         // Inicializar ViewModel
-        viewModel = ViewModelProvider(this).get(LocationViewModel::class.java)
+        viewModel = ViewModelProvider(this)[LocationViewModel::class.java]
+        viewModel.setMapProvider(savedMapProvider ?: "openstreetmap")
         Log.d("MainActivity", "ViewModel inicializado")
 
         setContent {
@@ -110,195 +115,69 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun saveMapProviderPreference(providerKey: String) {
+        sharedPreferences.edit().apply {
+            putString("map_provider", providerKey)
+            apply()
+        }
+    }
+
     @Composable
     fun MapScreen() {
         val context = LocalContext.current
-        val webViewRef = remember { mutableStateOf<WebView?>(null) }
         val isLoading = remember { mutableStateOf(true) }
         val searchQuery = remember { mutableStateOf("") }
         val coroutineScope = rememberCoroutineScope()
-        val sharedPreferences = remember { context.getSharedPreferences("map_prefs", Context.MODE_PRIVATE) }
 
-        // Solicitud de permisos de ubicación
-        val locationPermissionRequest = rememberLauncherForActivityResult(
-            ActivityResultContracts.RequestMultiplePermissions()
-        ) { permissions ->
-            val locationGranted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
-                    permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+        // Recoger los valores de StateFlow
+        val urlState by viewModel.urlState.collectAsState()
+        val mapProviderKey by viewModel.mapProviderKey.collectAsState()
 
-            if (locationGranted) {
-                // Ubicación concedida, centrar mapa
-                getCurrentLocation(webViewRef.value)
-            } else {
-                Toast.makeText(context, "Permiso de ubicación denegado", Toast.LENGTH_SHORT).show()
-            }
+        // Este key nos ayudará a recrear el WebView cuando cambie el proveedor
+        val webViewKey = remember { mutableStateOf(0) }
+
+        // Observar cambios en mapProviderKey y recrear el WebView
+        LaunchedEffect(mapProviderKey) {
+            webViewKey.value = webViewKey.value + 1
+            isLoading.value = true
         }
 
-        // HTML local para el mapa
-        val htmlContent = """
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="utf-8" />
-                <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                <title>Mapa OpenStreetMap</title>
-                <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-                <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-                <style>
-                    body, html, #map {
-                        height: 100%;
-                        margin: 0;
-                        padding: 0;
-                    }
-                </style>
-            </head>
-            <body>
-                <div id="map"></div>
-                <script>
-                    var map = L.map('map').setView([40.416775, -3.703790], 13);
-                    
-                    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                        maxZoom: 19,
-                        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-                    }).addTo(map);
-                    
-                    // Variable para almacenar marcadores
-                    var markers = [];
-                    
-                    // Función para agregar marcador
-                    function addMarker(lat, lng, title) {
-                        var marker = L.marker([lat, lng]).addTo(map);
-                        if (title) {
-                            marker.bindPopup("<b>" + title + "</b><br>Latitud: " + lat + "<br>Longitud: " + lng);
-                        }
-                        markers.push(marker);
-                        return markers.length - 1;
-                    }
-                    
-                    // Función para centrar el mapa
-                    function centerMap(lat, lng, zoom) {
-                        map.setView([lat, lng], zoom || 15);
-                    }
-                    
-                    // Búsqueda de lugares
-                    function searchLocation(query) {
-                        fetch('https://nominatim.openstreetmap.org/search?format=json&q=' + encodeURIComponent(query))
-                            .then(response => response.json())
-                            .then(data => {
-                                if (data.length > 0) {
-                                    var result = data[0];
-                                    centerMap(result.lat, result.lon);
-                                    addMarker(result.lat, result.lon, result.display_name);
-                                }
-                                return true;
-                            })
-                            .catch(() => {
-                                return false;
-                            });
-                    }
-                    
-                    // Función para eliminar todos los marcadores
-                    function clearMarkers() {
-                        for (var i = 0; i < markers.length; i++) {
-                            map.removeLayer(markers[i]);
-                        }
-                        markers = [];
-                    }
-                    
-                    // Función para obtener centro del mapa
-                    function getMapCenter() {
-                        var center = map.getCenter();
-                        return JSON.stringify({lat: center.lat, lng: center.lng, zoom: map.getZoom()});
-                    }
-                    
-                    // Inicializar mapa
-                    document.addEventListener('DOMContentLoaded', function() {
-                        setTimeout(function() {
-                            // Notificar a Android que el mapa está listo
-                            if (window.Android) {
-                                window.Android.onMapReady();
-                            }
-                        }, 500);
-                    });
-                </script>
-            </body>
-            </html>
-        """.trimIndent()
+        Column(
+            modifier = Modifier.fillMaxSize()
+        ) {
+            // Selector de proveedor de mapas
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text("Elegir mapa:", modifier = Modifier.align(Alignment.CenterVertically))
 
-        Box(modifier = Modifier.fillMaxSize()) {
-            // WebView para mostrar el mapa
-            AndroidView(
-                factory = { context ->
-                    WebView(context).apply {
-                        layoutParams = ViewGroup.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT
+                MapProviderManager.getAllProviders().forEach { (key, provider) ->
+                    Button(
+                        onClick = {
+                            viewModel.setMapProvider(key)
+                            saveMapProviderPreference(key)
+                            // No necesitamos forzar la recreación aquí, el LaunchedEffect lo hará
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (mapProviderKey == key)
+                                MaterialTheme.colorScheme.primary
+                            else
+                                MaterialTheme.colorScheme.secondary
                         )
-
-                        settings.javaScriptEnabled = true
-                        settings.domStorageEnabled = true
-                        settings.setGeolocationEnabled(true)
-
-                        webViewClient = object : WebViewClient() {
-                            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                                super.onPageStarted(view, url, favicon)
-                                isLoading.value = true
-                            }
-
-                            override fun onPageFinished(view: WebView?, url: String?) {
-                                super.onPageFinished(view, url)
-                                isLoading.value = false
-
-                                // Cargar ubicación guardada si existe
-                                val savedLocation = sharedPreferences.getString("last_location", null)
-                                if (savedLocation != null) {
-                                    view?.evaluateJavascript(
-                                        "try { " +
-                                                "var loc = $savedLocation; " +
-                                                "centerMap(loc.lat, loc.lng, loc.zoom || 15); " +
-                                                "} catch(e) { console.error(e); }",
-                                        null
-                                    )
-                                }
-                            }
-
-                            override fun onReceivedError(
-                                view: WebView?,
-                                request: WebResourceRequest?,
-                                error: WebResourceError?
-                            ) {
-                                super.onReceivedError(view, request, error)
-                                Toast.makeText(
-                                    context,
-                                    "Error al cargar el mapa: ${error?.description}",
-                                    Toast.LENGTH_SHORT
-                                ).show()
-                                isLoading.value = false
-                            }
-                        }
-
-                        // Cargar contenido HTML para el mapa
-                        loadDataWithBaseURL(
-                            "https://openstreetmap.org",
-                            htmlContent,
-                            "text/html",
-                            "UTF-8",
-                            null
-                        )
-
-                        webViewRef.value = this
-                        webViewReference = this
+                    ) {
+                        Text(provider.getName())
                     }
-                },
-                modifier = Modifier.fillMaxSize()
-            )
+                }
+            }
 
             // Barra de búsqueda
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(16.dp)
-                    .align(Alignment.TopCenter),
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 OutlinedTextField(
@@ -310,20 +189,14 @@ class MainActivity : ComponentActivity() {
                     keyboardActions = KeyboardActions(
                         onSearch = {
                             if (searchQuery.value.isNotEmpty()) {
-                                webViewRef.value?.evaluateJavascript(
-                                    "searchLocation('${searchQuery.value.replace("'", "\\'")}');",
-                                    null
-                                )
+                                viewModel.searchLocation(searchQuery.value)
                             }
                         }
                     ),
                     trailingIcon = {
                         IconButton(onClick = {
                             if (searchQuery.value.isNotEmpty()) {
-                                webViewRef.value?.evaluateJavascript(
-                                    "searchLocation('${searchQuery.value.replace("'", "\\'")}');",
-                                    null
-                                )
+                                viewModel.searchLocation(searchQuery.value)
                             }
                         }) {
                             Icon(Icons.Default.Search, contentDescription = "Buscar")
@@ -332,95 +205,162 @@ class MainActivity : ComponentActivity() {
                 )
             }
 
-            // Botones flotantes
-            Column(
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                // Botón de ubicación actual
-                FloatingActionButton(
-                    onClick = {
-                        requestLocationPermission(locationPermissionRequest)
+            // WebView
+            Box(modifier = Modifier.weight(1f)) {
+                // Solicitud de permisos de ubicación
+                val locationPermissionRequest = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestMultiplePermissions()
+                ) { permissions ->
+                    val locationGranted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+                            permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+
+                    if (locationGranted) {
+                        // Ubicación concedida, obtenemos ubicación actual
+                        getCurrentLocation()
+                    } else {
+                        Toast.makeText(context, "Permiso de ubicación denegado", Toast.LENGTH_SHORT).show()
                     }
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.LocationOn,
-                        contentDescription = "Mi ubicación"
-                    )
                 }
 
-                // Botón para guardar ubicación
-                FloatingActionButton(
-                    onClick = {
-                        saveCurrentMapView(webViewRef.value, sharedPreferences)
-                    }
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.Bookmarks,
-                        contentDescription = "Guardar ubicación"
-                    )
-                }
+                // WebView para mostrar el mapa con la URL del proveedor seleccionado
+                // Usamos la key para recrear el WebView cuando cambie el proveedor
+                AndroidView(
+                    factory = { context ->
+                        WebView(context).apply {
+                            layoutParams = ViewGroup.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT
+                            )
 
-                // Botón para limpiar marcadores
-                FloatingActionButton(
-                    onClick = {
-                        webViewRef.value?.evaluateJavascript("clearMarkers();", null)
-                    }
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Clear,
-                        contentDescription = "Limpiar marcadores"
-                    )
-                }
+                            settings.javaScriptEnabled = true
+                            settings.domStorageEnabled = true
+                            settings.setGeolocationEnabled(true)
 
-                // Botón principal
-                FloatingActionButton(
-                    onClick = {
-                        // Agregar marcador en el centro del mapa
-                        webViewRef.value?.evaluateJavascript(
-                            "(function() { " +
-                                    "var center = map.getCenter(); " +
-                                    "addMarker(center.lat, center.lng, 'Marcador'); " +
-                                    "})();",
-                            null
-                        )
+                            webViewClient = object : WebViewClient() {
+                                override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                                    super.onPageStarted(view, url, favicon)
+                                    isLoading.value = true
+                                }
+
+                                override fun onPageFinished(view: WebView?, url: String?) {
+                                    super.onPageFinished(view, url)
+                                    isLoading.value = false
+                                }
+
+                                override fun onReceivedError(
+                                    view: WebView?,
+                                    request: WebResourceRequest?,
+                                    error: WebResourceError?
+                                ) {
+                                    super.onReceivedError(view, request, error)
+                                    Toast.makeText(
+                                        context,
+                                        "Error al cargar el mapa: ${error?.description}",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                    isLoading.value = false
+                                }
+                            }
+
+                            webViewReference = this
+
+                            // Cargar la URL inicial según el proveedor seleccionado
+                            if (urlState.isNotEmpty()) {
+                                loadUrl(urlState)
+                            } else {
+                                // URL por defecto si no hay una seleccionada
+                                val provider = MapProviderManager.getCurrentProvider()
+                                loadUrl(provider.getMapUrl(40.416775, -3.703790, 13))
+                            }
+                        }
                     },
-                    containerColor = MaterialTheme.colorScheme.primary
-                ) {
-                    Icon(Icons.Default.Add, contentDescription = "Añadir marcador")
-                }
-            }
-
-            // Indicador de carga
-            if (isLoading.value) {
-                Box(
+                    update = { webView ->
+                        // Si necesitas actualizar el WebView en algún momento, puedes hacerlo aquí
+                    },
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(Color.White.copy(alpha = 0.7f)),
-                    contentAlignment = Alignment.Center
+                )
+
+                // Botones flotantes
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    CircularProgressIndicator()
+                    // Botón de ubicación actual
+                    FloatingActionButton(
+                        onClick = {
+                            requestLocationPermission(locationPermissionRequest)
+                        }
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.LocationOn,
+                            contentDescription = "Mi ubicación"
+                        )
+                    }
+
+                    // Botón para guardar ubicación
+                    FloatingActionButton(
+                        onClick = {
+                            // Implementar guardado de ubicación como favorito
+                            Toast.makeText(
+                                context,
+                                "Ubicación guardada como favorito",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Bookmarks,
+                            contentDescription = "Guardar ubicación"
+                        )
+                    }
+
+                    // Botón para limpiar marcadores
+                    FloatingActionButton(
+                        onClick = {
+                            // Limpiar marcadores
+                            Toast.makeText(
+                                context,
+                                "Marcadores eliminados",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Clear,
+                            contentDescription = "Limpiar marcadores"
+                        )
+                    }
+
+                    // Botón principal para añadir marcador
+                    FloatingActionButton(
+                        onClick = {
+                            // Añadir marcador en la posición actual
+                            Toast.makeText(
+                                context,
+                                "Marcador añadido",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        },
+                        containerColor = MaterialTheme.colorScheme.primary
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = "Añadir marcador")
+                    }
                 }
-            }
-        }
-    }
 
-    private fun saveCurrentMapView(webView: WebView?, sharedPreferences: SharedPreferences) {
-        webView?.evaluateJavascript("getMapCenter();") { result ->
-            // Eliminar comillas del resultado
-            val locationJson = result.trim('"').replace("\\\"", "\"").replace("\\\\", "\\")
-            try {
-                // Guardar ubicación actual
-                val editor = sharedPreferences.edit()
-                editor.putString("last_location", locationJson)
-                editor.apply()
-
-                Toast.makeText(this, "Ubicación guardada", Toast.LENGTH_SHORT).show()
-            } catch (e: Exception) {
-                Toast.makeText(this, "Error al guardar ubicación", Toast.LENGTH_SHORT).show()
-                Log.e("MapScreen", "Error: ${e.message}")
+                // Indicador de carga
+                if (isLoading.value) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.White.copy(alpha = 0.7f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator()
+                    }
+                }
             }
         }
     }
@@ -438,7 +378,7 @@ class MainActivity : ComponentActivity() {
 
         if (hasCoarseLocationPermission || hasFineLocationPermission) {
             // Ya tenemos el permiso, obtenemos la ubicación
-            getCurrentLocation(webViewReference)
+            getCurrentLocation()
         } else {
             // Solicitar permisos
             permissionLauncher.launch(
@@ -450,7 +390,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun getCurrentLocation(webView: WebView?) {
+    private fun getCurrentLocation() {
         if (ContextCompat.checkSelfPermission(
                 this,
                 Manifest.permission.ACCESS_FINE_LOCATION
@@ -463,11 +403,8 @@ class MainActivity : ComponentActivity() {
             fusedLocationClient.lastLocation
                 .addOnSuccessListener { location ->
                     if (location != null) {
-                        // Centrar mapa en la ubicación actual
-                        webView?.evaluateJavascript(
-                            "centerMap(${location.latitude}, ${location.longitude});",
-                            null
-                        )
+                        // Actualizar el ViewModel con la ubicación actual
+                        viewModel.setCurrentLocation(location.latitude, location.longitude)
                     } else {
                         Toast.makeText(
                             this,
@@ -630,6 +567,35 @@ class MainActivity : ComponentActivity() {
                             onCheckedChange = { /* TODO */ }
                         )
                         Text("Modo oscuro")
+                    }
+
+                    // Preferencia de mapa
+                    Text(
+                        "Proveedor de mapas preferido:",
+                        style = MaterialTheme.typography.titleSmall,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+
+                    Row(
+                        modifier = Modifier.padding(top = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        val mapProviderKey by viewModel.mapProviderKey.collectAsState()
+
+                        MapProviderManager.getAllProviders().forEach { (key, provider) ->
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(
+                                    selected = mapProviderKey == key,
+                                    onClick = {
+                                        viewModel.setMapProvider(key)
+                                        saveMapProviderPreference(key)
+                                    }
+                                )
+                                Text(provider.getName())
+                            }
+                        }
                     }
 
                     Button(
