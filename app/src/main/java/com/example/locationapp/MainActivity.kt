@@ -1,304 +1,447 @@
 package com.example.locationapp
 
-import androidx.compose.runtime.*
-import androidx.compose.material3.*
-import java.util.*
 import android.Manifest
+import android.content.Context
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
-import android.location.Location
+import android.graphics.Bitmap
 import android.os.Bundle
-import android.webkit.JavascriptInterface
+import android.util.Log
+import android.view.ViewGroup
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.outlined.Star // Usaremos Bookmark en lugar de Save
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.outlined.Bookmarks
+import androidx.compose.material.icons.outlined.Favorite
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModelProvider
-import androidx.lifecycle.viewmodel.compose.viewModel
-import com.example.locationapp.routing.RouteGenerator
-import com.example.locationapp.ui.screens.RouteScreen
 import com.example.locationapp.ui.theme.LocationAppTheme
 import com.example.locationapp.viewmodel.LocationViewModel
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationServices
-import com.google.android.gms.location.Priority
-import com.google.android.gms.tasks.CancellationTokenSource
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
-import org.json.JSONArray
-import java.text.SimpleDateFormat
-import java.util.*
 
 class MainActivity : ComponentActivity() {
-
     private lateinit var fusedLocationClient: FusedLocationProviderClient
     private lateinit var viewModel: LocationViewModel
     private var webViewReference: WebView? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Log.d("MainActivity", "onCreate iniciado")
 
-        // Inicializar el proveedor de ubicación
+        // Inicializar el cliente de ubicación
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
+        Log.d("MainActivity", "FusedLocationClient inicializado")
 
         // Inicializar ViewModel
-        viewModel = ViewModelProvider(this)[LocationViewModel::class.java]
+        viewModel = ViewModelProvider(this).get(LocationViewModel::class.java)
+        Log.d("MainActivity", "ViewModel inicializado")
 
         setContent {
+            Log.d("MainActivity", "Configurando UI con Compose")
             LocationAppTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    MainContent()
+                    var selectedTabIndex by remember { mutableStateOf(0) }
+
+                    Column {
+                        TabRow(selectedTabIndex = selectedTabIndex) {
+                            Tab(
+                                selected = selectedTabIndex == 0,
+                                onClick = { selectedTabIndex = 0 },
+                                text = { Text("Mapa") }
+                            )
+                            Tab(
+                                selected = selectedTabIndex == 1,
+                                onClick = { selectedTabIndex = 1 },
+                                text = { Text("Explorar") }
+                            )
+                            Tab(
+                                selected = selectedTabIndex == 2,
+                                onClick = { selectedTabIndex = 2 },
+                                text = { Text("Perfil") }
+                            )
+                        }
+
+                        when (selectedTabIndex) {
+                            0 -> {
+                                MapScreen()
+                            }
+                            1 -> {
+                                ExploreScreen()
+                            }
+                            2 -> {
+                                ProfileScreen()
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 
     @Composable
-    fun MainContent() {
+    fun MapScreen() {
+        val context = LocalContext.current
+        val webViewRef = remember { mutableStateOf<WebView?>(null) }
+        val isLoading = remember { mutableStateOf(true) }
+        val searchQuery = remember { mutableStateOf("") }
         val coroutineScope = rememberCoroutineScope()
-        var currentTab by remember { mutableStateOf(0) }
-        var currentLocation by remember { mutableStateOf<Pair<Double, Double>?>(null) }
-        var loading by remember { mutableStateOf(true) }
+        val sharedPreferences = remember { context.getSharedPreferences("map_prefs", Context.MODE_PRIVATE) }
 
-        // Recolectar flujo de ruta actual para actualizar el mapa
-        LaunchedEffect(key1 = Unit) {
-            viewModel.currentRoute.collectLatest { route ->
-                route?.let {
-                    // Actualizar el mapa con la nueva ruta
-                    webViewReference?.let { webView ->
-                        val routePoints = viewModel.getRouteForLeaflet()
-                        val transportMode = it.transportMode.toString()
-                        val jsCode = "if (typeof showRoute === 'function') { showRoute('$routePoints', '$transportMode'); }"
-                        webView.evaluateJavascript(jsCode, null)
-                    }
-                }
-            }
-        }
-
-        // Observar cambios en la ubicación actual
-        DisposableEffect(viewModel) {
-            val observer = androidx.lifecycle.Observer<Pair<Double, Double>> { location ->
-                currentLocation = location
-                loading = false
-            }
-            viewModel.currentLocation.observeForever(observer)
-
-            onDispose {
-                viewModel.currentLocation.removeObserver(observer)
-            }
-        }
-
-        // Solicitud de permisos
-        val requestPermissionLauncher = rememberLauncherForActivityResult(
-            contract = ActivityResultContracts.RequestMultiplePermissions()
+        // Solicitud de permisos de ubicación
+        val locationPermissionRequest = rememberLauncherForActivityResult(
+            ActivityResultContracts.RequestMultiplePermissions()
         ) { permissions ->
-            val locationGranted = permissions.entries.all { it.value }
+            val locationGranted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+                    permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+
             if (locationGranted) {
-                getCurrentLocation()
+                // Ubicación concedida, centrar mapa
+                getCurrentLocation(webViewRef.value)
             } else {
-                Toast.makeText(
-                    this@MainActivity,
-                    "Se requieren permisos de ubicación para funcionar correctamente",
-                    Toast.LENGTH_LONG
-                ).show()
+                Toast.makeText(context, "Permiso de ubicación denegado", Toast.LENGTH_SHORT).show()
             }
         }
 
-        // Verificar permisos al inicio
-        LaunchedEffect(key1 = true) {
-            checkLocationPermissions(requestPermissionLauncher)
-        }
-
-        Column(modifier = Modifier.fillMaxSize()) {
-            // Tabs para navegación
-            TabRow(selectedTabIndex = currentTab) {
-                Tab(
-                    selected = currentTab == 0,
-                    onClick = { currentTab = 0 },
-                    text = { Text("Mapa") }
-                )
-                Tab(
-                    selected = currentTab == 1,
-                    onClick = { currentTab = 1 },
-                    text = { Text("Rutas") }
-                )
-                Tab(
-                    selected = currentTab == 2,
-                    onClick = { currentTab = 2 },
-                    text = { Text("Exploración") }
-                )
-            }
-
-            // Contenido según el tab seleccionado
-            when (currentTab) {
-                0 -> {
-                    // OpenStreetMap
-                    Box(modifier = Modifier.fillMaxSize()) {
-                        // WebView para OpenStreetMap
-                        AndroidView(
-                            factory = { context ->
-                                WebView(context).apply {
-                                    settings.javaScriptEnabled = true
-                                    settings.domStorageEnabled = true
-
-                                    // Configurar interfaz JavaScript
-                                    addJavascriptInterface(
-                                        WebAppInterface(coroutineScope),
-                                        "AndroidInterface"
-                                    )
-
-                                    webViewClient = object : WebViewClient() {
-                                        override fun onPageFinished(view: WebView?, url: String?) {
-                                            super.onPageFinished(view, url)
-                                            // Actualizar puntos de interés y zonas cuando la página se carga
-                                            viewModel.allPointsOfInterest.value?.let { pois ->
-                                                val poisJson = JSONArray().apply {
-                                                    pois.forEach { poi ->
-                                                        put(org.json.JSONObject().apply {
-                                                            put("id", poi.id)
-                                                            put("name", poi.name)
-                                                            put("lat", poi.latitude)
-                                                            put("lng", poi.longitude)
-                                                            put("category", poi.category)
-                                                            put("visited", poi.isVisited)
-                                                        })
-                                                    }
-                                                }
-                                                val updateCode = "if (typeof updatePOIs === 'function') { updatePOIs('${poisJson}'); }"
-                                                evaluateJavascript(updateCode, null)
-                                            }
-
-                                            viewModel.allZones.value?.let { zones ->
-                                                val zonesJson = JSONArray().apply {
-                                                    zones.forEach { zone ->
-                                                        put(org.json.JSONObject().apply {
-                                                            put("id", zone.id)
-                                                            put("name", zone.name)
-                                                            put("coordinates", zone.coordinates)
-                                                            put("discovered", zone.isDiscovered)
-                                                        })
-                                                    }
-                                                }
-                                                val updateCode = "if (typeof updateZones === 'function') { updateZones('${zonesJson}'); }"
-                                                evaluateJavascript(updateCode, null)
-                                            }
-                                        }
-                                    }
-
-                                    // Guardar referencia al WebView
-                                    webViewReference = this
-                                }
-                            },
-                            update = { webView ->
-                                currentLocation?.let { (latitude, longitude) ->
-                                    loadOpenStreetMap(webView, latitude, longitude)
-                                    loading = false
-                                }
-                            },
-                            modifier = Modifier.fillMaxSize()
-                        )
-
-                        // Loading indicator
-                        if (loading) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.align(Alignment.Center)
-                            )
-                        }
-
-                        // Botón para añadir POI
-                        FloatingActionButton(
-                            onClick = {
-                                currentLocation?.let { location ->
-                                    showAddPoiDialog(location.first, location.second)
-                                }
-                            },
-                            modifier = Modifier
-                                .align(Alignment.BottomEnd)
-                                .padding(16.dp)
-                        ) {
-                            Text("+")
-                        }
-
-                        // Barra de progreso de exploración
-                        LinearProgressIndicator(
-                            progress = { viewModel.explorationProgress.value ?: 0f },
-                            modifier = Modifier
-                                .align(Alignment.BottomCenter)
-                                .padding(16.dp)
-                                .fillMaxWidth(0.8f)
-                        )
+        // HTML local para el mapa
+        val htmlContent = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="utf-8" />
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Mapa OpenStreetMap</title>
+                <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+                <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+                <style>
+                    body, html, #map {
+                        height: 100%;
+                        margin: 0;
+                        padding: 0;
                     }
-                }
-                1 -> {
-                    // Pantalla de generación de rutas
-                    RouteScreen(
-                        viewModel = viewModel,
-                        onGenerateRouteClick = { route ->
-                            // Cambiar a la pestaña del mapa para mostrar la ruta
-                            currentTab = 0
+                </style>
+            </head>
+            <body>
+                <div id="map"></div>
+                <script>
+                    var map = L.map('map').setView([40.416775, -3.703790], 13);
+                    
+                    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                        maxZoom: 19,
+                        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+                    }).addTo(map);
+                    
+                    // Variable para almacenar marcadores
+                    var markers = [];
+                    
+                    // Función para agregar marcador
+                    function addMarker(lat, lng, title) {
+                        var marker = L.marker([lat, lng]).addTo(map);
+                        if (title) {
+                            marker.bindPopup("<b>" + title + "</b><br>Latitud: " + lat + "<br>Longitud: " + lng);
                         }
+                        markers.push(marker);
+                        return markers.length - 1;
+                    }
+                    
+                    // Función para centrar el mapa
+                    function centerMap(lat, lng, zoom) {
+                        map.setView([lat, lng], zoom || 15);
+                    }
+                    
+                    // Búsqueda de lugares
+                    function searchLocation(query) {
+                        fetch('https://nominatim.openstreetmap.org/search?format=json&q=' + encodeURIComponent(query))
+                            .then(response => response.json())
+                            .then(data => {
+                                if (data.length > 0) {
+                                    var result = data[0];
+                                    centerMap(result.lat, result.lon);
+                                    addMarker(result.lat, result.lon, result.display_name);
+                                }
+                                return true;
+                            })
+                            .catch(() => {
+                                return false;
+                            });
+                    }
+                    
+                    // Función para eliminar todos los marcadores
+                    function clearMarkers() {
+                        for (var i = 0; i < markers.length; i++) {
+                            map.removeLayer(markers[i]);
+                        }
+                        markers = [];
+                    }
+                    
+                    // Función para obtener centro del mapa
+                    function getMapCenter() {
+                        var center = map.getCenter();
+                        return JSON.stringify({lat: center.lat, lng: center.lng, zoom: map.getZoom()});
+                    }
+                    
+                    // Inicializar mapa
+                    document.addEventListener('DOMContentLoaded', function() {
+                        setTimeout(function() {
+                            // Notificar a Android que el mapa está listo
+                            if (window.Android) {
+                                window.Android.onMapReady();
+                            }
+                        }, 500);
+                    });
+                </script>
+            </body>
+            </html>
+        """.trimIndent()
+
+        Box(modifier = Modifier.fillMaxSize()) {
+            // WebView para mostrar el mapa
+            AndroidView(
+                factory = { context ->
+                    WebView(context).apply {
+                        layoutParams = ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT
+                        )
+
+                        settings.javaScriptEnabled = true
+                        settings.domStorageEnabled = true
+                        settings.setGeolocationEnabled(true)
+
+                        webViewClient = object : WebViewClient() {
+                            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                                super.onPageStarted(view, url, favicon)
+                                isLoading.value = true
+                            }
+
+                            override fun onPageFinished(view: WebView?, url: String?) {
+                                super.onPageFinished(view, url)
+                                isLoading.value = false
+
+                                // Cargar ubicación guardada si existe
+                                val savedLocation = sharedPreferences.getString("last_location", null)
+                                if (savedLocation != null) {
+                                    view?.evaluateJavascript(
+                                        "try { " +
+                                                "var loc = $savedLocation; " +
+                                                "centerMap(loc.lat, loc.lng, loc.zoom || 15); " +
+                                                "} catch(e) { console.error(e); }",
+                                        null
+                                    )
+                                }
+                            }
+
+                            override fun onReceivedError(
+                                view: WebView?,
+                                request: WebResourceRequest?,
+                                error: WebResourceError?
+                            ) {
+                                super.onReceivedError(view, request, error)
+                                Toast.makeText(
+                                    context,
+                                    "Error al cargar el mapa: ${error?.description}",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                                isLoading.value = false
+                            }
+                        }
+
+                        // Cargar contenido HTML para el mapa
+                        loadDataWithBaseURL(
+                            "https://openstreetmap.org",
+                            htmlContent,
+                            "text/html",
+                            "UTF-8",
+                            null
+                        )
+
+                        webViewRef.value = this
+                        webViewReference = this
+                    }
+                },
+                modifier = Modifier.fillMaxSize()
+            )
+
+            // Barra de búsqueda
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp)
+                    .align(Alignment.TopCenter),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    value = searchQuery.value,
+                    onValueChange = { searchQuery.value = it },
+                    placeholder = { Text("Buscar lugares...") },
+                    modifier = Modifier.weight(1f),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    keyboardActions = KeyboardActions(
+                        onSearch = {
+                            if (searchQuery.value.isNotEmpty()) {
+                                webViewRef.value?.evaluateJavascript(
+                                    "searchLocation('${searchQuery.value.replace("'", "\\'")}');",
+                                    null
+                                )
+                            }
+                        }
+                    ),
+                    trailingIcon = {
+                        IconButton(onClick = {
+                            if (searchQuery.value.isNotEmpty()) {
+                                webViewRef.value?.evaluateJavascript(
+                                    "searchLocation('${searchQuery.value.replace("'", "\\'")}');",
+                                    null
+                                )
+                            }
+                        }) {
+                            Icon(Icons.Default.Search, contentDescription = "Buscar")
+                        }
+                    }
+                )
+            }
+
+            // Botones flotantes
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Botón de ubicación actual
+                FloatingActionButton(
+                    onClick = {
+                        requestLocationPermission(locationPermissionRequest)
+                    }
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.LocationOn,
+                        contentDescription = "Mi ubicación"
                     )
                 }
-                2 -> {
-                    // Pantalla de exploración y estadísticas
-                    ExplorationScreen(viewModel)
+
+                // Botón para guardar ubicación
+                FloatingActionButton(
+                    onClick = {
+                        saveCurrentMapView(webViewRef.value, sharedPreferences)
+                    }
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Bookmarks,
+                        contentDescription = "Guardar ubicación"
+                    )
+                }
+
+                // Botón para limpiar marcadores
+                FloatingActionButton(
+                    onClick = {
+                        webViewRef.value?.evaluateJavascript("clearMarkers();", null)
+                    }
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Clear,
+                        contentDescription = "Limpiar marcadores"
+                    )
+                }
+
+                // Botón principal
+                FloatingActionButton(
+                    onClick = {
+                        // Agregar marcador en el centro del mapa
+                        webViewRef.value?.evaluateJavascript(
+                            "(function() { " +
+                                    "var center = map.getCenter(); " +
+                                    "addMarker(center.lat, center.lng, 'Marcador'); " +
+                                    "})();",
+                            null
+                        )
+                    },
+                    containerColor = MaterialTheme.colorScheme.primary
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = "Añadir marcador")
+                }
+            }
+
+            // Indicador de carga
+            if (isLoading.value) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.White.copy(alpha = 0.7f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator()
                 }
             }
         }
     }
 
-    inner class WebAppInterface(private val coroutineScope: androidx.compose.runtime.CoroutineScope) {
-        @JavascriptInterface
-        fun onMapClick(latitude: Double, longitude: Double) {
-            runOnUiThread {
-                // Mostrar diálogo para añadir un punto de interés
-                showAddPoiDialog(latitude, longitude)
-            }
-        }
+    private fun saveCurrentMapView(webView: WebView?, sharedPreferences: SharedPreferences) {
+        webView?.evaluateJavascript("getMapCenter();") { result ->
+            // Eliminar comillas del resultado
+            val locationJson = result.trim('"').replace("\\\"", "\"").replace("\\\\", "\\")
+            try {
+                // Guardar ubicación actual
+                val editor = sharedPreferences.edit()
+                editor.putString("last_location", locationJson)
+                editor.apply()
 
-        @JavascriptInterface
-        fun onPoiClick(poiId: Long) {
-            runOnUiThread {
-                // Mostrar detalles del punto de interés
-                showPoiDetailDialog(poiId)
-            }
-        }
-
-        @JavascriptInterface
-        fun markPoiAsVisited(poiId: Long) {
-            coroutineScope.launch {
-                viewModel.markPointAsVisited(poiId)
+                Toast.makeText(this, "Ubicación guardada", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Toast.makeText(this, "Error al guardar ubicación", Toast.LENGTH_SHORT).show()
+                Log.e("MapScreen", "Error: ${e.message}")
             }
         }
     }
 
-    private fun checkLocationPermissions(launcher: androidx.activity.result.ActivityResultLauncher<Array<String>>) {
-        val fineLocationPermission = ContextCompat.checkSelfPermission(
-            this, Manifest.permission.ACCESS_FINE_LOCATION
-        )
-        val coarseLocationPermission = ContextCompat.checkSelfPermission(
-            this, Manifest.permission.ACCESS_COARSE_LOCATION
-        )
+    private fun requestLocationPermission(permissionLauncher: ActivityResultLauncher<Array<String>>) {
+        val hasCoarseLocationPermission = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.ACCESS_COARSE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
 
-        if (fineLocationPermission == PackageManager.PERMISSION_GRANTED &&
-            coarseLocationPermission == PackageManager.PERMISSION_GRANTED) {
-            getCurrentLocation()
+        val hasFineLocationPermission = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (hasCoarseLocationPermission || hasFineLocationPermission) {
+            // Ya tenemos el permiso, obtenemos la ubicación
+            getCurrentLocation(webViewReference)
         } else {
-            launcher.launch(
+            // Solicitar permisos
+            permissionLauncher.launch(
                 arrayOf(
                     Manifest.permission.ACCESS_FINE_LOCATION,
                     Manifest.permission.ACCESS_COARSE_LOCATION
@@ -307,300 +450,110 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun getCurrentLocation() {
-        try {
-            val cancellationToken = CancellationTokenSource()
-
-            fusedLocationClient.getCurrentLocation(
-                Priority.PRIORITY_HIGH_ACCURACY,
-                cancellationToken.token
-            ).addOnSuccessListener { location: Location? ->
-                if (location != null) {
-                    // Actualizar ubicación en el ViewModel
-                    viewModel.setCurrentLocation(location.latitude, location.longitude)
-                } else {
-                    handleLocationError("No se pudo obtener la ubicación")
+    private fun getCurrentLocation(webView: WebView?) {
+        if (ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.ACCESS_COARSE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
+        ) {
+            fusedLocationClient.lastLocation
+                .addOnSuccessListener { location ->
+                    if (location != null) {
+                        // Centrar mapa en la ubicación actual
+                        webView?.evaluateJavascript(
+                            "centerMap(${location.latitude}, ${location.longitude});",
+                            null
+                        )
+                    } else {
+                        Toast.makeText(
+                            this,
+                            "No se pudo obtener la ubicación actual",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
                 }
-            }.addOnFailureListener { e ->
-                handleLocationError("Error al obtener la ubicación: ${e.message}")
-            }
-        } catch (e: SecurityException) {
-            handleLocationError("Se requieren permisos de ubicación")
+                .addOnFailureListener { e ->
+                    Toast.makeText(
+                        this,
+                        "Error al obtener ubicación: ${e.message}",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
         }
     }
 
-    private fun loadOpenStreetMap(webView: WebView, latitude: Double, longitude: Double) {
-        val currentTime = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+    @Composable
+    fun ExploreScreen() {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
+        ) {
+            Text(
+                "Explorar la ciudad",
+                style = MaterialTheme.typography.headlineMedium
+            )
 
-        // Crear HTML con Leaflet para mostrar el mapa
-        val leafletHtml = """
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="utf-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-                <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-                <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-                <style>
-                    body { margin: 0; padding: 0; }
-                    html, body, #map { height: 100%; width: 100%; }
-                    .progress-container {
-                        position: absolute;
-                        bottom: 20px;
-                        left: 50%;
-                        transform: translateX(-50%);
-                        background: rgba(255,255,255,0.8);
-                        padding: 10px;
-                        border-radius: 5px;
-                        box-shadow: 0 0 10px rgba(0,0,0,0.2);
-                        z-index: 1000;
-                    }
-                    .poi-marker {
-                        border-radius: 50%;
-                        width: 12px;
-                        height: 12px;
-                        border: 2px solid white;
-                    }
-                    .poi-marker.visited { background-color: #4CAF50; }
-                    .poi-marker.unvisited { background-color: #2196F3; }
-                    .route-marker-label {
-                        background-color: transparent;
-                        border: none;
-                        box-shadow: none;
-                        font-weight: bold;
-                        font-size: 12px;
-                        color: white;
-                        margin-top: -4px;
-                        margin-left: -4px;
-                    }
-                </style>
-            </head>
-            <body>
-                <div id="map"></div>
-                <script>
-                    // Inicializar el mapa centrado en la ubicación actual
-                    var map = L.map('map').setView([$latitude, $longitude], 15);
-                    
-                    // Añadir capa de mapa de OpenStreetMap
-                    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-                    }).addTo(map);
-                    
-                    // Añadir marcador en la posición actual
-                    var marker = L.marker([$latitude, $longitude]).addTo(map);
-                    marker.bindPopup("<b>Mi ubicación</b><br>Actualizado: $currentTime").openPopup();
-                    
-                    // Añadir un círculo para mostrar precisión aproximada
-                    var circle = L.circle([$latitude, $longitude], {
-                        color: 'blue',
-                        fillColor: '#3388ff',
-                        fillOpacity: 0.1,
-                        radius: 100
-                    }).addTo(map);
-                    
-                    // Variables para almacenar capas
-                    var poisLayer = L.layerGroup().addTo(map);
-                    var zonesLayer = L.layerGroup().addTo(map);
-                    var routeLayer = L.layerGroup().addTo(map);
-                    
-                    // Función para actualizar puntos de interés
-                    function updatePOIs(poisData) {
-                        // Limpiar capa de POIs
-                        poisLayer.clearLayers();
-                        
-                        // Parsear datos JSON
-                        const pois = JSON.parse(poisData);
-                        
-                        // Añadir cada POI al mapa
-                        pois.forEach(poi => {
-                            const markerColor = poi.visited ? 'visited' : 'unvisited';
-                            
-                            // Crear marcador personalizado
-                            const poiMarker = L.divIcon({
-                                className: `poi-marker ${markerColor}`,
-                                html: '',
-                                iconSize: [16, 16]
-                            });
-                            
-                            // Añadir marcador al mapa
-                            const marker = L.marker([poi.lat, poi.lng], {
-                                icon: poiMarker,
-                                title: poi.name
-                            }).addTo(poisLayer);
-                            
-                            // Añadir popup con información
-                            marker.bindPopup(
-                                `<b>${poi.name}</b><br>` +
-                                `Categoría: ${poi.category}<br>` +
-                                `Estado: ${poi.visited ? 'Visitado' : 'Por visitar'}<br>` +
-                                `<button onclick="AndroidInterface.markPoiAsVisited(${poi.id})">Marcar como visitado</button>`
-                            );
-                            
-                            // Añadir evento de clic
-                            marker.on('click', function() {
-                                AndroidInterface.onPoiClick(poi.id);
-                            });
-                        });
-                    }
-                    
-                    // Función para actualizar zonas
-                    function updateZones(zonesData) {
-                        // Limpiar capa de zonas
-                        zonesLayer.clearLayers();
-                        
-                        // Parsear datos JSON
-                        const zones = JSON.parse(zonesData);
-                        
-                        // Añadir cada zona al mapa
-                        zones.forEach(zone => {
-                            // Crear polígono para la zona
-                            const polygon = L.polygon(zone.coordinates, {
-                                color: zone.discovered ? '#4CAF50' : '#FF9800',
-                                fillColor: zone.discovered ? '#A5D6A7' : '#FFE0B2',
-                                fillOpacity: 0.3,
-                                weight: 2
-                            }).addTo(zonesLayer);
-                            
-                            // Añadir popup con información
-                            polygon.bindPopup(
-                                `<b>${zone.name}</b><br>` +
-                                `Estado: ${zone.discovered ? 'Descubierta' : 'Por descubrir'}`
-                            );
-                        });
-                    }
-                    
-                    // Función para actualizar progreso de exploración
-                    function updateExplorationProgress(percent) {
-                        // Si no existe el contenedor de progreso, crearlo
-                        let progressContainer = document.querySelector('.progress-container');
-                        if (!progressContainer) {
-                            progressContainer = document.createElement('div');
-                            progressContainer.className = 'progress-container';
-                            document.body.appendChild(progressContainer);
-                        }
-                        
-                        // Actualizar contenido del contenedor
-                        progressContainer.innerHTML = `
-                            <div>Exploración: ${percent}%</div>
-                            <div style="background: #eee; height: 10px; width: 200px; margin-top: 5px;">
-                                <div style="background: #4CAF50; height: 10px; width: ${percent * 2}px;"></div>
-                            </div>
-                        `;
-                    }
-                    
-                    // Función para mostrar ruta
-                    function showRoute(routePoints, transportMode) {
-                        // Limpiar capa de ruta anterior
-                        routeLayer.clearLayers();
-                        
-                        // Parsear los puntos de la ruta
-                        const points = JSON.parse(routePoints);
-                        
-                        if (points.length < 2) return;
-                        
-                        // Crear polilínea para la ruta
-                        const routeColor = getTransportModeColor(transportMode);
-                        const routeLine = L.polyline(points, {
-                            color: routeColor,
-                            weight: 5,
-                            opacity: 0.7,
-                            lineJoin: 'round'
-                        }).addTo(routeLayer);
-                        
-                        // Añadir marcadores para cada punto
-                        for (let i = 0; i < points.length; i++) {
-                            const isStart = i === 0;
-                            const isEnd = i === points.length - 1;
-                            
-                            let markerColor = '#3388ff';
-                            if (isStart) markerColor = '#4CAF50';
-                            if (isEnd) markerColor = '#F44336';
-                            
-                            const marker = L.circleMarker(points[i], {
-                                radius: 8,
-                                fillColor: markerColor,
-                                color: '#fff',
-                                weight: 2,
-                                opacity: 1,
-                                fillOpacity: 0.8
-                            }).addTo(routeLayer);
-                            
-                            // Añadir etiqueta con número de orden
-                            marker.bindTooltip((i + 1).toString(), {
-                                permanent: true,
-                                direction: 'center',
-                                className: 'route-marker-label'
-                            }).openTooltip();
-                        }
-                        
-                        // Ajustar vista para mostrar toda la ruta
-                        map.fitBounds(routeLine.getBounds(), {
-                            padding: [50, 50]
-                        });
-                    }
-                    
-                    function getTransportModeColor(mode) {
-                        switch (mode) {
-                            case 'WALKING':
-                                return '#4CAF50'; // Verde
-                            case 'CYCLING':
-                                return '#2196F3'; // Azul
-                            case 'DRIVING':
-                                return '#F44336'; // Rojo
-                            default:
-                                return '#3388ff'; // Azul por defecto
-                        }
-                    }
-                    
-                    // Manejar clic en el mapa para añadir puntos
-                    map.on('contextmenu', function(e) {
-                        AndroidInterface.onMapClick(e.latlng.lat, e.latlng.lng);
-                    });
-                </script>
-            </body>
-            </html>
-        """.trimIndent()
+            Spacer(modifier = Modifier.height(16.dp))
 
-        webView.loadDataWithBaseURL(
-            "https://openstreetmap.org",
-            leafletHtml,
-            "text/html",
-            "UTF-8",
-            null
-        )
-    }
+            LinearProgressIndicator(
+                progress = { 0.35f },
+                modifier = Modifier.fillMaxWidth()
+            )
 
-    private fun loadGoogleMaps(webView: WebView, latitude: Double, longitude: Double) {
-        // Cargar Google Maps con la ubicación actual
-        val googleMapsUrl = "https://www.google.com/maps/@$latitude,$longitude,15z"
-        webView.loadUrl(googleMapsUrl)
-    }
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(
+                "Has explorado el 35% de las zonas disponibles",
+                style = MaterialTheme.typography.bodyLarge
+            )
 
-    private fun handleLocationError(message: String) {
-        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
-    }
+            Spacer(modifier = Modifier.height(32.dp))
 
-    private fun showAddPoiDialog(latitude: Double, longitude: Double) {
-        // En una implementación real, aquí mostraríamos un DialogFragment o AlertDialog
-        // Para esta demostración, añadiremos directamente un punto predeterminado
-        viewModel.addPointOfInterest(
-            name = "Nuevo lugar",
-            latitude = latitude,
-            longitude = longitude,
-            category = "Favoritos"
-        )
+            Text(
+                "Rutas Sugeridas",
+                style = MaterialTheme.typography.headlineSmall
+            )
 
-        Toast.makeText(this, "Punto de interés añadido", Toast.LENGTH_SHORT).show()
-    }
+            Spacer(modifier = Modifier.height(16.dp))
 
-    private fun showPoiDetailDialog(poiId: Long) {
-        // En una implementación real, aquí mostraríamos un DialogFragment con los detalles
-        Toast.makeText(this, "Detalles del punto de interés $poiId", Toast.LENGTH_SHORT).show()
+            // Ruta de ejemplo
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(8.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        "Ruta de Monumentos",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Text(
+                        "Visita los principales monumentos de la ciudad",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Button(
+                        onClick = {
+                            Toast.makeText(
+                                this@MainActivity,
+                                "Funcionalidad de visualización de rutas en desarrollo",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        },
+                        modifier = Modifier.align(Alignment.End)
+                    ) {
+                        Text("Ver en mapa")
+                    }
+                }
+            }
+        }
     }
 
     @Composable
-    fun ExplorationScreen(viewModel: LocationViewModel) {
-        // Esta pantalla mostraría estadísticas de exploración, rutas sugeridas, etc.
+    fun ProfileScreen() {
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -608,27 +561,44 @@ class MainActivity : ComponentActivity() {
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
-                text = "Progreso de Exploración",
+                "Perfil de Usuario",
                 style = MaterialTheme.typography.headlineMedium
-            )
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            LinearProgressIndicator(
-                progress = { viewModel.explorationProgress.value ?: 0f },
-                modifier = Modifier.fillMaxWidth()
             )
 
             Spacer(modifier = Modifier.height(32.dp))
 
+            // Avatar placeholder
+            Box(
+                modifier = Modifier
+                    .size(120.dp)
+                    .background(
+                        color = MaterialTheme.colorScheme.primary,
+                        shape = CircleShape
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    "U",
+                    style = MaterialTheme.typography.headlineLarge,
+                    color = MaterialTheme.colorScheme.onPrimary
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
             Text(
-                text = "Rutas Sugeridas",
-                style = MaterialTheme.typography.headlineSmall
+                "Usuario Explorador",
+                style = MaterialTheme.typography.titleLarge
             )
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Text(
+                "usuario@ejemplo.com",
+                style = MaterialTheme.typography.bodyLarge
+            )
 
-            // Aquí iría un LazyColumn con las rutas sugeridas
+            Spacer(modifier = Modifier.height(32.dp))
+
+            // Preferencias de usuario
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -636,101 +606,45 @@ class MainActivity : ComponentActivity() {
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text(
-                        text = "Ruta de Monumentos",
+                        "Preferencias",
                         style = MaterialTheme.typography.titleMedium
                     )
-                    Text(
-                        text = "Visita los principales monumentos de la ciudad",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                    Button(
-                        onClick = {
-                            // Generar una ruta con todos los puntos de la categoría "Monumentos"
-                            val monumentos = viewModel.allPointsOfInterest.value.filter { it.category == "Monumentos" }
-                            if (monumentos.isNotEmpty()) {
-                                viewModel.generateRoute(monumentos)
-                            }
-                        },
-                        modifier = Modifier.align(Alignment.End)
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("Ver en mapa")
+                        Checkbox(
+                            checked = true,
+                            onCheckedChange = { /* TODO */ }
+                        )
+                        Text("Notificaciones")
                     }
-                }
-            }
 
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(8.dp)
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "Zonas por descubrir",
-                        style = MaterialTheme.typography.titleMedium
-                    )
-                    Text(
-                        text = "Recorrido por áreas que aún no has explorado",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                    Button(
-                        onClick = {
-                            // En una implementación real, generaría una ruta por zonas no descubiertas
-                            val noVisitados = viewModel.allPointsOfInterest.value.filter { !it.isVisited }
-                            if (noVisitados.isNotEmpty()) {
-                                viewModel.generateRoute(noVisitados)
-                            }
-                        },
-                        modifier = Modifier.align(Alignment.End)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("Ver en mapa")
+                        Checkbox(
+                            checked = false,
+                            onCheckedChange = { /* TODO */ }
+                        )
+                        Text("Modo oscuro")
                     }
-                }
-            }
 
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Opción para simular tráfico
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(8.dp)
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "Simulador de Tráfico",
-                        style = MaterialTheme.typography.titleMedium
-                    )
-                    Text(
-                        text = "Simula patrones de tráfico en tus rutas",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
                     Button(
                         onClick = {
-                            // Simulación de tráfico (ejercicio 4, opción B)
-                            val route = viewModel.currentRoute.value
-                            if (route != null) {
-                                val routeGenerator = RouteGenerator()
-                                val segments = routeGenerator.generateRouteSegments(route)
-                                val simulatedSegments = routeGenerator.simulateTraffic(segments)
-                                val trafficStatus = routeGenerator.getTrafficStatus(simulatedSegments)
-
-                                // En una implementación real, mostrarías esto visualmente en el mapa
-                                Toast.makeText(
-                                    this@MainActivity,
-                                    "Simulación de tráfico activada",
-                                    Toast.LENGTH_SHORT
-                                ).show()
-                            } else {
-                                Toast.makeText(
-                                    this@MainActivity,
-                                    "Primero genera una ruta",
-                                    Toast.LENGTH_SHORT
-                                ).show()
-                            }
+                            Toast.makeText(
+                                this@MainActivity,
+                                "Configuración guardada",
+                                Toast.LENGTH_SHORT
+                            ).show()
                         },
-                        modifier = Modifier.align(Alignment.End)
+                        modifier = Modifier
+                            .align(Alignment.End)
+                            .padding(top = 16.dp)
                     ) {
-                        Text("Simular tráfico")
+                        Text("Guardar")
                     }
                 }
             }

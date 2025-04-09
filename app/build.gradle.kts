@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    id("kotlin-kapt") // Agregar este plugin
 }
 
 android {
@@ -61,7 +62,7 @@ dependencies {
     // Room Database
     implementation("androidx.room:room-runtime:2.6.0")
     implementation("androidx.room:room-ktx:2.6.0")
-    annotationProcessor("androidx.room:room-compiler:2.6.0")
+    kapt("androidx.room:room-compiler:2.6.0") // Cambiar annotationProcessor por kapt
 
     // Para view binding y backward compatibility
     implementation("androidx.appcompat:appcompat:1.6.1")
@@ -69,6 +70,13 @@ dependencies {
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.6.2")
     implementation("androidx.lifecycle:lifecycle-livedata-ktx:2.6.2")
+    // Material3
+    implementation ("androidx.compose.material3:material3:1.1.0")
+// Material (para algunos iconos)
+    implementation ("androidx.compose.material:material:1.4.0")
+// Google Play services location
+    implementation ("com.google.android.gms:play-services-location:21.0.1")
+    implementation ("androidx.compose.material:material-icons-extended:1.4.0")
 
     // Testing
     testImplementation(libs.junit)

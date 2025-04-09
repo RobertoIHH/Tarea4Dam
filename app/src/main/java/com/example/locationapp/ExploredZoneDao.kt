@@ -1,5 +1,6 @@
 package com.example.locationapp.data
 
+import org.json.JSONArray
 import androidx.lifecycle.LiveData
 import androidx.room.Dao
 import androidx.room.Delete
@@ -33,10 +34,42 @@ interface ExploredZoneDao {
     @Query("SELECT COUNT(*) FROM explored_zones WHERE isDiscovered = 1")
     suspend fun getDiscoveredZoneCount(): Int
 
-    @Query("SELECT * FROM explored_zones WHERE " +
-            "(:lat BETWEEN (SELECT MIN(json_extract(coordinates, '$[*][0]')) FROM json_each(coordinates)) AND " +
-            "(SELECT MAX(json_extract(coordinates, '$[*][0]')) FROM json_each(coordinates))) AND " +
-            "(:lng BETWEEN (SELECT MIN(json_extract(coordinates, '$[*][1]')) FROM json_each(coordinates)) AND " +
-            "(SELECT MAX(json_extract(coordinates, '$[*][1]')) FROM json_each(coordinates)))")
-    suspend fun getZonesContainingPoint(lat: Double, lng: Double): List<ExploredZone>
+    @Query("SELECT * FROM explored_zones")
+    suspend fun getAllZonesRaw(): List<ExploredZone>
+
+    // Esta función reemplaza getZonesContainingPoint con una implementación que no usa SQL complejo
+    suspend fun getZonesContainingPoint(lat: Double, lng: Double): List<ExploredZone> {
+        // Primero obtenemos todas las zonas
+        val allZones = getAllZonesRaw()
+
+        // Luego filtramos manualmente las que contienen el punto
+        return allZones.filter { zone ->
+            try {
+                // Parseamos las coordenadas de la zona
+                val coordinates = JSONArray(zone.coordinates)
+
+                // Obtenemos los límites del polígono
+                var minLat = Double.MAX_VALUE
+                var maxLat = Double.MIN_VALUE
+                var minLng = Double.MAX_VALUE
+                var maxLng = Double.MIN_VALUE
+
+                for (i in 0 until coordinates.length()) {
+                    val point = coordinates.getJSONArray(i)
+                    val pointLat = point.getDouble(0)
+                    val pointLng = point.getDouble(1)
+
+                    minLat = minOf(minLat, pointLat)
+                    maxLat = maxOf(maxLat, pointLat)
+                    minLng = minOf(minLng, pointLng)
+                    maxLng = maxOf(maxLng, pointLng)
+                }
+
+                // Verificamos si el punto está dentro de los límites
+                lat in minLat..maxLat && lng in minLng..maxLng
+            } catch (e: Exception) {
+                false
+            }
+        }
+    }
 }
