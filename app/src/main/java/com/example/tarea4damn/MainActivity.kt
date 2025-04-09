@@ -4,7 +4,9 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.location.Location
 import android.os.Bundle
+import android.webkit.JavascriptInterface
 import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -21,15 +23,17 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.locationapp.routing.RouteGenerator
+import com.example.locationapp.ui.screens.RouteScreen
 import com.example.locationapp.ui.theme.LocationAppTheme
 import com.example.locationapp.viewmodel.LocationViewModel
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.android.gms.tasks.CancellationTokenSource
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import org.json.JSONArray
-import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -37,6 +41,7 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var fusedLocationClient: FusedLocationProviderClient
     private lateinit var viewModel: LocationViewModel
+    private var webViewReference: WebView? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -53,30 +58,60 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    MainScreen(viewModel)
+                    MainContent()
                 }
             }
         }
     }
 
     @Composable
-    fun MainScreen(viewModel: LocationViewModel = viewModel()) {
-        val context = LocalContext.current
+    fun MainContent() {
         val coroutineScope = rememberCoroutineScope()
         var currentTab by remember { mutableStateOf(0) }
         var currentLocation by remember { mutableStateOf<Pair<Double, Double>?>(null) }
         var loading by remember { mutableStateOf(true) }
-        var progress by remember { mutableStateOf(0f) }
+
+        // Recolectar flujo de ruta actual para actualizar el mapa
+        LaunchedEffect(key1 = Unit) {
+            viewModel.currentRoute.collectLatest { route ->
+                route?.let {
+                    // Actualizar el mapa con la nueva ruta
+                    webViewReference?.let { webView ->
+                        val routePoints = viewModel.getRouteForLeaflet()
+                        val transportMode = it.transportMode.toString()
+                        val jsCode = "if (typeof showRoute === 'function') { showRoute('$routePoints', '$transportMode'); }"
+                        webView.evaluateJavascript(jsCode, null)
+                    }
+                }
+            }
+        }
+
+        // Observar cambios en la ubicación actual
+        DisposableEffect(viewModel) {
+            val observer = androidx.lifecycle.Observer<Pair<Double, Double>> { location ->
+                currentLocation = location
+                loading = false
+            }
+            viewModel.currentLocation.observeForever(observer)
+
+            onDispose {
+                viewModel.currentLocation.removeObserver(observer)
+            }
+        }
 
         // Solicitud de permisos
         val requestPermissionLauncher = rememberLauncherForActivityResult(
-            ActivityResultContracts.RequestMultiplePermissions()
+            contract = ActivityResultContracts.RequestMultiplePermissions()
         ) { permissions ->
             val locationGranted = permissions.entries.all { it.value }
             if (locationGranted) {
                 getCurrentLocation()
             } else {
-                Toast.makeText(context, "Se requieren permisos de ubicación para funcionar correctamente", Toast.LENGTH_LONG).show()
+                Toast.makeText(
+                    this@MainActivity,
+                    "Se requieren permisos de ubicación para funcionar correctamente",
+                    Toast.LENGTH_LONG
+                ).show()
             }
         }
 
@@ -85,25 +120,18 @@ class MainActivity : ComponentActivity() {
             checkLocationPermissions(requestPermissionLauncher)
         }
 
-        // Observar el progreso de exploración
-        LaunchedEffect(viewModel) {
-            viewModel.explorationProgress.observe(context as ComponentActivity) { newProgress ->
-                progress = newProgress
-            }
-        }
-
         Column(modifier = Modifier.fillMaxSize()) {
             // Tabs para navegación
             TabRow(selectedTabIndex = currentTab) {
                 Tab(
                     selected = currentTab == 0,
                     onClick = { currentTab = 0 },
-                    text = { Text("OpenStreetMap") }
+                    text = { Text("Mapa") }
                 )
                 Tab(
                     selected = currentTab == 1,
                     onClick = { currentTab = 1 },
-                    text = { Text("Google Maps") }
+                    text = { Text("Rutas") }
                 )
                 Tab(
                     selected = currentTab == 2,
@@ -123,6 +151,53 @@ class MainActivity : ComponentActivity() {
                                 WebView(context).apply {
                                     settings.javaScriptEnabled = true
                                     settings.domStorageEnabled = true
+
+                                    // Configurar interfaz JavaScript
+                                    addJavascriptInterface(
+                                        WebAppInterface(coroutineScope),
+                                        "AndroidInterface"
+                                    )
+
+                                    webViewClient = object : WebViewClient() {
+                                        override fun onPageFinished(view: WebView?, url: String?) {
+                                            super.onPageFinished(view, url)
+                                            // Actualizar puntos de interés y zonas cuando la página se carga
+                                            viewModel.allPointsOfInterest.value?.let { pois ->
+                                                val poisJson = JSONArray().apply {
+                                                    pois.forEach { poi ->
+                                                        put(org.json.JSONObject().apply {
+                                                            put("id", poi.id)
+                                                            put("name", poi.name)
+                                                            put("lat", poi.latitude)
+                                                            put("lng", poi.longitude)
+                                                            put("category", poi.category)
+                                                            put("visited", poi.isVisited)
+                                                        })
+                                                    }
+                                                }
+                                                val updateCode = "if (typeof updatePOIs === 'function') { updatePOIs('${poisJson}'); }"
+                                                evaluateJavascript(updateCode, null)
+                                            }
+
+                                            viewModel.allZones.value?.let { zones ->
+                                                val zonesJson = JSONArray().apply {
+                                                    zones.forEach { zone ->
+                                                        put(org.json.JSONObject().apply {
+                                                            put("id", zone.id)
+                                                            put("name", zone.name)
+                                                            put("coordinates", zone.coordinates)
+                                                            put("discovered", zone.isDiscovered)
+                                                        })
+                                                    }
+                                                }
+                                                val updateCode = "if (typeof updateZones === 'function') { updateZones('${zonesJson}'); }"
+                                                evaluateJavascript(updateCode, null)
+                                            }
+                                        }
+                                    }
+
+                                    // Guardar referencia al WebView
+                                    webViewReference = this
                                 }
                             },
                             update = { webView ->
@@ -145,10 +220,7 @@ class MainActivity : ComponentActivity() {
                         FloatingActionButton(
                             onClick = {
                                 currentLocation?.let { location ->
-                                    coroutineScope.launch {
-                                        // Mostrar diálogo para añadir POI
-                                        showAddPoiDialog(location.first, location.second)
-                                    }
+                                    showAddPoiDialog(location.first, location.second)
                                 }
                             },
                             modifier = Modifier
@@ -160,7 +232,7 @@ class MainActivity : ComponentActivity() {
 
                         // Barra de progreso de exploración
                         LinearProgressIndicator(
-                            progress = { progress },
+                            progress = { viewModel.explorationProgress.value ?: 0f },
                             modifier = Modifier
                                 .align(Alignment.BottomCenter)
                                 .padding(16.dp)
@@ -169,35 +241,44 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 1 -> {
-                    // Google Maps
-                    Box(modifier = Modifier.fillMaxSize()) {
-                        AndroidView(
-                            factory = { context ->
-                                WebView(context).apply {
-                                    settings.javaScriptEnabled = true
-                                    settings.domStorageEnabled = true
-                                }
-                            },
-                            update = { webView ->
-                                currentLocation?.let { (latitude, longitude) ->
-                                    loadGoogleMaps(webView, latitude, longitude)
-                                    loading = false
-                                }
-                            },
-                            modifier = Modifier.fillMaxSize()
-                        )
-
-                        if (loading) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.align(Alignment.Center)
-                            )
+                    // Pantalla de generación de rutas
+                    RouteScreen(
+                        viewModel = viewModel,
+                        onGenerateRouteClick = { route ->
+                            // Cambiar a la pestaña del mapa para mostrar la ruta
+                            currentTab = 0
                         }
-                    }
+                    )
                 }
                 2 -> {
-                    // Pantalla de Exploración
+                    // Pantalla de exploración y estadísticas
                     ExplorationScreen(viewModel)
                 }
+            }
+        }
+    }
+
+    inner class WebAppInterface(private val coroutineScope: androidx.compose.runtime.CoroutineScope) {
+        @JavascriptInterface
+        fun onMapClick(latitude: Double, longitude: Double) {
+            runOnUiThread {
+                // Mostrar diálogo para añadir un punto de interés
+                showAddPoiDialog(latitude, longitude)
+            }
+        }
+
+        @JavascriptInterface
+        fun onPoiClick(poiId: Long) {
+            runOnUiThread {
+                // Mostrar detalles del punto de interés
+                showPoiDetailDialog(poiId)
+            }
+        }
+
+        @JavascriptInterface
+        fun markPoiAsVisited(poiId: Long) {
+            coroutineScope.launch {
+                viewModel.markPointAsVisited(poiId)
             }
         }
     }
@@ -279,6 +360,16 @@ class MainActivity : ComponentActivity() {
                     }
                     .poi-marker.visited { background-color: #4CAF50; }
                     .poi-marker.unvisited { background-color: #2196F3; }
+                    .route-marker-label {
+                        background-color: transparent;
+                        border: none;
+                        box-shadow: none;
+                        font-weight: bold;
+                        font-size: 12px;
+                        color: white;
+                        margin-top: -4px;
+                        margin-left: -4px;
+                    }
                 </style>
             </head>
             <body>
@@ -307,6 +398,7 @@ class MainActivity : ComponentActivity() {
                     // Variables para almacenar capas
                     var poisLayer = L.layerGroup().addTo(map);
                     var zonesLayer = L.layerGroup().addTo(map);
+                    var routeLayer = L.layerGroup().addTo(map);
                     
                     // Función para actualizar puntos de interés
                     function updatePOIs(poisData) {
@@ -393,6 +485,70 @@ class MainActivity : ComponentActivity() {
                         `;
                     }
                     
+                    // Función para mostrar ruta
+                    function showRoute(routePoints, transportMode) {
+                        // Limpiar capa de ruta anterior
+                        routeLayer.clearLayers();
+                        
+                        // Parsear los puntos de la ruta
+                        const points = JSON.parse(routePoints);
+                        
+                        if (points.length < 2) return;
+                        
+                        // Crear polilínea para la ruta
+                        const routeColor = getTransportModeColor(transportMode);
+                        const routeLine = L.polyline(points, {
+                            color: routeColor,
+                            weight: 5,
+                            opacity: 0.7,
+                            lineJoin: 'round'
+                        }).addTo(routeLayer);
+                        
+                        // Añadir marcadores para cada punto
+                        for (let i = 0; i < points.length; i++) {
+                            const isStart = i === 0;
+                            const isEnd = i === points.length - 1;
+                            
+                            let markerColor = '#3388ff';
+                            if (isStart) markerColor = '#4CAF50';
+                            if (isEnd) markerColor = '#F44336';
+                            
+                            const marker = L.circleMarker(points[i], {
+                                radius: 8,
+                                fillColor: markerColor,
+                                color: '#fff',
+                                weight: 2,
+                                opacity: 1,
+                                fillOpacity: 0.8
+                            }).addTo(routeLayer);
+                            
+                            // Añadir etiqueta con número de orden
+                            marker.bindTooltip((i + 1).toString(), {
+                                permanent: true,
+                                direction: 'center',
+                                className: 'route-marker-label'
+                            }).openTooltip();
+                        }
+                        
+                        // Ajustar vista para mostrar toda la ruta
+                        map.fitBounds(routeLine.getBounds(), {
+                            padding: [50, 50]
+                        });
+                    }
+                    
+                    function getTransportModeColor(mode) {
+                        switch (mode) {
+                            case 'WALKING':
+                                return '#4CAF50'; // Verde
+                            case 'CYCLING':
+                                return '#2196F3'; // Azul
+                            case 'DRIVING':
+                                return '#F44336'; // Rojo
+                            default:
+                                return '#3388ff'; // Azul por defecto
+                        }
+                    }
+                    
                     // Manejar clic en el mapa para añadir puntos
                     map.on('contextmenu', function(e) {
                         AndroidInterface.onMapClick(e.latlng.lat, e.latlng.lng);
@@ -432,6 +588,11 @@ class MainActivity : ComponentActivity() {
         )
 
         Toast.makeText(this, "Punto de interés añadido", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun showPoiDetailDialog(poiId: Long) {
+        // En una implementación real, aquí mostraríamos un DialogFragment con los detalles
+        Toast.makeText(this, "Detalles del punto de interés $poiId", Toast.LENGTH_SHORT).show()
     }
 
     @Composable
@@ -480,7 +641,13 @@ class MainActivity : ComponentActivity() {
                         style = MaterialTheme.typography.bodyMedium
                     )
                     Button(
-                        onClick = { /* Mostrar ruta en el mapa */ },
+                        onClick = {
+                            // Generar una ruta con todos los puntos de la categoría "Monumentos"
+                            val monumentos = viewModel.allPointsOfInterest.value.filter { it.category == "Monumentos" }
+                            if (monumentos.isNotEmpty()) {
+                                viewModel.generateRoute(monumentos)
+                            }
+                        },
                         modifier = Modifier.align(Alignment.End)
                     ) {
                         Text("Ver en mapa")
@@ -503,10 +670,64 @@ class MainActivity : ComponentActivity() {
                         style = MaterialTheme.typography.bodyMedium
                     )
                     Button(
-                        onClick = { /* Mostrar ruta en el mapa */ },
+                        onClick = {
+                            // En una implementación real, generaría una ruta por zonas no descubiertas
+                            val noVisitados = viewModel.allPointsOfInterest.value.filter { !it.isVisited }
+                            if (noVisitados.isNotEmpty()) {
+                                viewModel.generateRoute(noVisitados)
+                            }
+                        },
                         modifier = Modifier.align(Alignment.End)
                     ) {
                         Text("Ver en mapa")
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Opción para simular tráfico
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(8.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "Simulador de Tráfico",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Text(
+                        text = "Simula patrones de tráfico en tus rutas",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Button(
+                        onClick = {
+                            // Simulación de tráfico (ejercicio 4, opción B)
+                            val route = viewModel.currentRoute.value
+                            if (route != null) {
+                                val routeGenerator = RouteGenerator()
+                                val segments = routeGenerator.generateRouteSegments(route)
+                                val simulatedSegments = routeGenerator.simulateTraffic(segments)
+                                val trafficStatus = routeGenerator.getTrafficStatus(simulatedSegments)
+
+                                // En una implementación real, mostrarías esto visualmente en el mapa
+                                Toast.makeText(
+                                    this@MainActivity,
+                                    "Simulación de tráfico activada",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            } else {
+                                Toast.makeText(
+                                    this@MainActivity,
+                                    "Primero genera una ruta",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        },
+                        modifier = Modifier.align(Alignment.End)
+                    ) {
+                        Text("Simular tráfico")
                     }
                 }
             }
