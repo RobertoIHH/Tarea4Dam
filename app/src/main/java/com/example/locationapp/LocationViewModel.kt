@@ -21,7 +21,8 @@ import kotlin.math.abs
 
 class LocationViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val repository: PointOfInterestRepository
+    protected val repository: PointOfInterestRepository
+    protected val _explorationProgress = MutableLiveData<Float>(0f)
 
     // StateFlow para usar con Compose
     private val _pointsOfInterest = MutableStateFlow<List<PointOfInterest>>(emptyList())
@@ -325,5 +326,27 @@ class LocationViewModel(application: Application) : AndroidViewModel(application
         }
 
         return routes
+    }
+    fun checkAndUpdateExploredZones(latitude: Double, longitude: Double) {
+        viewModelScope.launch {
+            val database = AppDatabase.getDatabase(getApplication())
+            val exploredZonesDao = database.exploredZoneDao()
+
+            val zonesAtLocation = exploredZonesDao.getZonesContainingPoint(latitude, longitude)
+            var discoveredNewZone = false
+
+            for (zone in zonesAtLocation) {
+                if (!zone.isDiscovered) {
+                    repository.markZoneAsDiscovered(zone.id)
+                    discoveredNewZone = true
+                }
+            }
+
+            // Actualizar progreso si se descubrió una nueva zona
+            if (discoveredNewZone) {
+                val progress = repository.calculateExplorationProgress()
+                _explorationProgress.postValue(progress)
+            }
+        }
     }
 }

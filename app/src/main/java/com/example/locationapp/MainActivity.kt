@@ -1,5 +1,7 @@
 package com.example.locationapp
 
+
+import androidx.compose.ui.unit.dp
 import android.Manifest
 import android.content.Context
 import android.content.SharedPreferences
@@ -54,6 +56,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var sharedPreferences: SharedPreferences
 
     override fun onCreate(savedInstanceState: Bundle?) {
+
         super.onCreate(savedInstanceState)
         Log.d("MainActivity", "onCreate iniciado")
 
